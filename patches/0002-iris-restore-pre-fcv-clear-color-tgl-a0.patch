@@ -1,0 +1,32 @@
+diff --git a/src/gallium/drivers/iris/iris_resolve.c b/src/gallium/drivers/iris/iris_resolve.c
+index 55be80aca79..e4e5ae97a8a 100644
+--- a/src/gallium/drivers/iris/iris_resolve.c
++++ b/src/gallium/drivers/iris/iris_resolve.c
+@@ -1276,12 +1276,26 @@ iris_resource_prepare_render(struct iris_context *ice,
+     * of the steps involved with changing the clear color. For now, just keep
+     * things simple and assume we have the worst case usage of FCV_CCS_E.
+     */
++   /* The struct is embedded in the context, so we can safely get the screen. */
++   struct iris_screen *screen = (void *) ice->ctx.screen;
++   const struct intel_device_info *devinfo = screen->devinfo;
++
++   /* On TGL A0, initializing the clear color only for FCV_CCS_E leaves some
++    * resources with an unknown fast-clear value, visible as opaque blocks in
++    * compositor shadows and translucent regions. Keep the pre-a0bb9cb6d8e
++    * non-32bpc check for these parts; other platforms retain the FCV-aware
++    * condition. See the linked issue for the scope discussion.
++    */
++   const bool tgl_a0 = devinfo->platform == INTEL_PLATFORM_TGL &&
++                       devinfo->revision == 0;
++
+    if (!iris_render_formats_color_compatible(render_format,
+                                              res->surf.format,
+                                              res->aux.clear_color,
+                                              res->aux.clear_color_unknown) ||
+        (res->aux.clear_color_unknown && !res->mod_info &&
+-        aux_usage == ISL_AUX_USAGE_FCV_CCS_E)) {
++        (tgl_a0 ? isl_format_get_layout(render_format)->channels.r.bits != 32
++                : aux_usage == ISL_AUX_USAGE_FCV_CCS_E))) {
+ 
+       /* Remove references to the clear color with resolves. */
+       iris_resource_prepare_access(ice, res, 0, INTEL_REMAINING_LEVELS, 0,
