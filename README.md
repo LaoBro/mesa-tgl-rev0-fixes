@@ -19,9 +19,6 @@ lspci -nn -s 00:02.0
 cat /sys/class/drm/card0/device/revision   # expect 0x00
 ```
 
-Kernels before 5.12 name the device `TigerLake-H GT1`; newer kernels may show
-`TigerLake-H GT1 [UHD Graphics]`.
-
 ## The two bugs
 
 | Patch | Symptom | Regression introduced by | Fix |
