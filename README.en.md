@@ -2,12 +2,12 @@ English | [简体中文](README.md)
 
 # Mesa fixes for Tiger Lake-H with PCI revision 0x00
 
-Two small, self-contained Mesa patches for rendering regressions on Intel
+Three small, self-contained Mesa patches for rendering regressions on Intel
 TigerLake-H GT1 graphics when the PCI revision reads `0x00`.
 
 These are carried here because the fixes are gated to revision-0 hardware and
-upstream review of revision-0-only changes is not guaranteed. Both patches are
-no-ops on production steppings.
+upstream review of revision-0-only changes is not guaranteed. All three patches
+are no-ops on production steppings.
 
 ## Affected hardware
 
@@ -21,12 +21,13 @@ lspci -nn -s 00:02.0
 cat /sys/class/drm/card0/device/revision   # expect 0x00
 ```
 
-## The two bugs
+## The three bugs
 
 | Patch | Symptom | Regression introduced by | Fix |
 |---|---|---|---|
 | `0001-isl-restore-tgl-rev0-buffer-texture-wa.patch` | Corrupted text/glyphs in Firefox, rendering errors in Chrome on complex pages | `4c06c736c56` ("intel/isl: Remove unknown workaround", Mesa 23.3.0) | Restores the Gen12 revision-0 buffer-texture workaround, narrowed to `gfx12.0 + TGL + revision 0` |
 | `0002-iris-restore-pre-fcv-clear-color-tgl-a0.patch` | Opaque color blocks in window/menu shadows and translucent regions (KWin/Wayland, X11/GLAMOR) | `a0bb9cb6d8e` ("iris: Update clear color initializations for FCV", Mesa 25.2.0) | Keeps the pre-`a0bb9cb6d8e` clear-color condition on `TGL + revision 0` |
+| `0003-iris-tgl-a0-tex-cache-invalidate-stall.patch` | Whole-screen freeze for 5–10 s that then recovers; kernel log shows `Resetting rcs0 for preemption time out` and `GPU HANG: ecode 12:1:85dffffb` | No single regression commit (Tiger Lake revision-0 hardware behaviour) | On `TGL + revision 0`, emit the cache-tracker texture-cache invalidation as an end-of-pipe sync (CS stall + post-sync write) |
 
 The first bug is a hardware defect: buffer textures whose base addresses are
 less than 64 bytes apart corrupt each other. The PRM only requires buffer
@@ -39,6 +40,16 @@ blocks into the fast-clear state as a side effect. `a0bb9cb6d8e` replaced a
 long-standing clear-color initialization condition; on this hardware it leaves
 some resources with an unknown fast-clear value. `INTEL_DEBUG=noccs` hides the
 symptom.
+
+The third issue is not a regression from a particular commit but Tiger Lake
+revision-0 pre-production hardware behaviour: when a render target is about to
+be sampled, the cache-tracker barrier emits a standalone
+`PIPE_CONTROL(Texture Cache Invalidate)`, and on this stepping that
+invalidation can never complete. The command streamer then sits on the next
+command until the kernel preemption timeout (`preempt_timeout_ms`, 7500 ms on
+the reference machine) resets the context. The patch keeps every invalidation
+bit and only routes the command through an end-of-pipe sync (CS stall +
+post-sync write), giving the invalidation an explicit completion point.
 
 ## Build
 
@@ -54,7 +65,7 @@ git checkout mesa-26.2.3        # or any recent main
 /path/to/this/repo/build.sh "$PWD" /path/to/install-prefix
 ```
 
-`build.sh` applies both patches (it skips any that are already applied),
+`build.sh` applies all three patches (it skips any that are already applied),
 configures an iris-only build, compiles it, and installs into the given prefix.
 The default prefix is `./out`.
 
@@ -63,6 +74,7 @@ Manual equivalent:
 ```sh
 patch -p1 < 0001-isl-restore-tgl-rev0-buffer-texture-wa.patch
 patch -p1 < 0002-iris-restore-pre-fcv-clear-color-tgl-a0.patch
+patch -p1 < 0003-iris-tgl-a0-tex-cache-invalidate-stall.patch
 
 meson setup build \
   -Dgallium-drivers=iris \
@@ -113,7 +125,9 @@ Some distributions use `lib64` instead of `lib`; adjust the paths accordingly.
    ```
 
    A hang resets the compositor's GL context and invalidates any rendering
-   observation; log in again and re-test.
+   observation; log in again and re-test. Patch 3 targets exactly this: the
+   output should stay empty after long use, including scrolling image-heavy
+   pages.
 
 3. Symptoms: Firefox text renders normally, and window/menu shadows no longer
    show opaque blocks.
@@ -131,13 +145,17 @@ meant to be the downstream carrier.
 
 ## Notes and caveats
 
-* Both patches only change behaviour when `revision == 0`. Production parts are
-  unaffected.
+* All three patches only change behaviour when `revision == 0`. Production parts
+  are unaffected.
 * Patch 2 is deliberately narrow (Tiger Lake, revision 0). Whether the clear
   color condition should be restored for all FCV platforms is discussed in
   issue #16853.
 * Patch context is Mesa `main` around November 2026 and `mesa-26.2.3`. On other
   trees the hunks may apply with fuzz (`patch -p1 -F3`) or need a refresh.
+* Patch 3 adds one CS stall + post-sync write per render-target → sampler
+  barrier. It buys the completion point for the invalidation; the performance
+  cost has not been measured. It covers the GL/iris path only; the compute
+  batch variant (`compute_stall_sequence`) is left unchanged.
 * Rebuild after a system LLVM or Mesa dependency upgrade. A Mesa build links
   against the system LLVM; if LLVM's soname changes, the old build will fail to
   load.

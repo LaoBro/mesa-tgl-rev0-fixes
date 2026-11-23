@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build Mesa with the two Tiger Lake revision-0 fixes and install into a
+# Build Mesa with the three Tiger Lake revision-0 fixes and install into a
 # private prefix.
 #
 # Usage:
@@ -47,6 +47,7 @@ apply_patch() {
 
 apply_patch "$PATCHDIR/0001-isl-restore-tgl-rev0-buffer-texture-wa.patch"
 apply_patch "$PATCHDIR/0002-iris-restore-pre-fcv-clear-color-tgl-a0.patch"
+apply_patch "$PATCHDIR/0003-iris-tgl-a0-tex-cache-invalidate-stall.patch"
 
 MESON_ARGS=(
     --prefix="$PREFIX"

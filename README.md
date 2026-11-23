@@ -2,10 +2,10 @@
 
 # Tiger Lake-H（PCI revision 0x00）Mesa 修复补丁
 
-两个独立、小范围的 Mesa 补丁，用于修复 Intel TigerLake-H GT1 核显在
+三个独立、小范围的 Mesa 补丁，用于修复 Intel TigerLake-H GT1 核显在
 PCI revision 为 `0x00` 时的渲染异常。
 
-这两个补丁都只对 revision 0 的硬件生效，量产步进完全不受影响。放在这里
+这三个补丁都只对 revision 0 的硬件生效，量产步进完全不受影响。放在这里
 是因为上游对「只针对 revision 0」的改动不一定接收，下游用户可以自行携带。
 
 ## 受影响的硬件
@@ -20,12 +20,13 @@ lspci -nn -s 00:02.0
 cat /sys/class/drm/card0/device/revision   # 期望 0x00
 ```
 
-## 两个 bug
+## 三个 bug
 
 | 补丁 | 症状 | 回归来源 | 做法 |
 |---|---|---|---|
 | `0001-isl-restore-tgl-rev0-buffer-texture-wa.patch` | Firefox 字体/字形破损，Chrome 复杂页面渲染错误 | `4c06c736c56`（Mesa 23.3.0，删除「未知 workaround」） | 恢复 Gen12 revision 0 的 buffer texture workaround，收窄到 `gfx12.0 + TGL + revision 0` |
 | `0002-iris-restore-pre-fcv-clear-color-tgl-a0.patch` | 窗口/菜单阴影、半透明区域出现不透明色块（KWin/Wayland、X11/GLAMOR） | `a0bb9cb6d8e`（Mesa 25.2.0，FCV 清色初始化改动） | 在 `TGL + revision 0` 上保留 `a0bb9cb6d8e` 之前的清色初始化条件 |
+| `0003-iris-tgl-a0-tex-cache-invalidate-stall.patch` | 整屏冻结 5–10 秒后自动恢复；内核日志出现 `Resetting rcs0 for preemption time out` 与 `GPU HANG: ecode 12:1:85dffffb` | 无单一回归提交（TGL revision 0 的硬件行为） | 在 `TGL + revision 0` 上把 cache tracker 的 texture cache invalidate 改为带 `CS_STALL` + post-sync 写的 end-of-pipe sync |
 
 第一个是硬件缺陷：基地址相差小于 64 字节的 buffer texture 会互相破坏。
 PRM 只要求 buffer surface 基地址按元素大小对齐，因此这种描述符是合法的，
@@ -35,6 +36,14 @@ PRM 只要求 buffer surface 基地址按元素大小对齐，因此这种描述
 workaround：普通 draw call 会顺带把 CCS 块推进 fast-clear 状态。
 `a0bb9cb6d8e` 换掉了一个长期存在的清色初始化条件，导致这类硬件上部分资源
 带着未知的 fast-clear 值。`INTEL_DEBUG=noccs` 可以掩盖症状。
+
+第三个不是某次提交引入的回归，而是 Tiger Lake revision 0 预生产硬件的行为：
+渲染目标转为采样纹理时，cache tracker barrier 会单独发出一条
+`PIPE_CONTROL(Texture Cache Invalidate)`；在这颗芯片上该失效可能永远不完成，
+命令流随后停在下一指令，直到内核抢占超时（`preempt_timeout_ms`，本机 7500 ms）
+触发 context reset。补丁保留全部失效位，只把它改成带 `CS_STALL` 和 post-sync 写的
+end-of-pipe sync，给失效一个明确的完成点。详细证据见本机实验记录
+（`hang-exp/stage3-result-1.md`、`stage3-invstall-run.md`）。
 
 ## 构建
 
@@ -49,7 +58,7 @@ git checkout mesa-26.2.3        # 或任意较新的 main
 /path/to/this/repo/build.sh "$PWD" /path/to/install-prefix
 ```
 
-`build.sh` 会自动应用两个补丁（已应用的会跳过），配置仅 iris 的构建，
+`build.sh` 会自动应用三个补丁（已应用的会跳过），配置仅 iris 的构建，
 编译并安装到指定前缀。默认前缀是 `./out`。
 
 手动操作等价于：
@@ -57,6 +66,7 @@ git checkout mesa-26.2.3        # 或任意较新的 main
 ```sh
 patch -p1 < 0001-isl-restore-tgl-rev0-buffer-texture-wa.patch
 patch -p1 < 0002-iris-restore-pre-fcv-clear-color-tgl-a0.patch
+patch -p1 < 0003-iris-tgl-a0-tex-cache-invalidate-stall.patch
 
 meson setup build \
   -Dgallium-drivers=iris \
@@ -106,6 +116,7 @@ firefox
    ```
 
    hang 会重置合成器的 GL context，使之后的渲染观察全部失效；应重登再测。
+   补丁 3 的目标就是让这里在长时间使用（含滚动图片密集页面）后仍为空。
 
 3. 症状：Firefox 字体正常，窗口/菜单阴影不再出现不透明色块。
 
@@ -121,11 +132,14 @@ firefox
 
 ## 说明与限制
 
-* 两个补丁仅在 `revision == 0` 时改变行为，量产步进不受影响。
+* 三个补丁仅在 `revision == 0` 时改变行为，量产步进不受影响。
 * 补丁 2 刻意只覆盖 Tiger Lake revision 0。是否应把所有 FCV 平台都恢复旧
   条件，见 issue #16853 的讨论。
 * 补丁上下文基于 2026 年 11 月前后的 Mesa `main` 与 `mesa-26.2.3`。其它版本
   可能需要 fuzz（`patch -p1 -F3`）或手动刷新。
+* 补丁 3 会在每个「渲染目标 → 采样纹理」barrier 上多一次 CS stall + post-sync 写，
+  换来失效的完成点；性能影响尚未量化。它只覆盖 GL/iris 路径，compute batch 的
+  同类 barrier（`compute_stall_sequence`）未改动。
 * 系统 LLVM 或 Mesa 依赖升级后需要重新编译。Mesa 运行时会链接系统 LLVM，
   LLVM soname 变化会导致旧构建无法加载。
 * 本项目与 Intel、Mesa 官方无关，不提供任何担保。

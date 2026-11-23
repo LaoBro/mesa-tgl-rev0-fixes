@@ -1,0 +1,30 @@
+diff --git a/src/gallium/drivers/iris/iris_pipe_control.c b/src/gallium/drivers/iris/iris_pipe_control.c
+index 4ff5060f3d8..c113e3fa86a 100644
+--- a/src/gallium/drivers/iris/iris_pipe_control.c
++++ b/src/gallium/drivers/iris/iris_pipe_control.c
+@@ -310,6 +310,25 @@ iris_emit_buffer_barrier_for(struct iris_batch *batch,
+       if (batch->name == IRIS_BATCH_COMPUTE)
+          bits &= ~PIPE_CONTROL_GRAPHICS_BITS;
+ 
++      /* Tiger Lake revision 0 (pre-production) can leave a standalone
++       * PIPE_CONTROL that carries Texture Cache Invalidate permanently
++       * incomplete.  The command streamer then sits on the following
++       * command until the kernel's preemption timeout fires and resets the
++       * context, which surfaces as "Resetting rcs0 for preemption time out"
++       * followed by "GPU HANG".  Give the invalidation a completion point by
++       * emitting it as an end-of-pipe sync (CS stall + post-sync write).
++       * Only revision 0 is affected; production steppings keep the existing
++       * sequence.
++       */
++      if (devinfo->platform == INTEL_PLATFORM_TGL &&
++          devinfo->revision == 0 &&
++          (bits & PIPE_CONTROL_TEXTURE_CACHE_INVALIDATE) &&
++          !compute_stall_sequence) {
++         iris_emit_end_of_pipe_sync(batch, "cache tracker: invalidate (TGL A0)",
++                                    bits & ~all_flush_bits);
++         bits &= all_flush_bits;
++      }
++
+       /* Emit any required flushes and invalidations. */
+       if ((bits & all_flush_bits) || compute_stall_sequence)
+          iris_emit_end_of_pipe_sync(batch, "cache tracker: flush",
